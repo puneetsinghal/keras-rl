@@ -9,6 +9,8 @@ import numpy as np
 
 from keras.callbacks import Callback as KerasCallback, CallbackList as KerasCallbackList
 from keras.utils.generic_utils import Progbar
+from keras import backend as K
+import tensorflow as tf
 
 
 class Callback(KerasCallback):
@@ -325,7 +327,7 @@ class FileLogger(Callback):
 
 class Visualizer(Callback):
     def on_action_end(self, action, logs):
-        self.env.render(mode='human')
+        self.env.render()
 
 
 class ModelIntervalCheckpoint(Callback):
@@ -346,3 +348,110 @@ class ModelIntervalCheckpoint(Callback):
         if self.verbose > 0:
             print('Step {}: saving model to {}'.format(self.total_steps, filepath))
         self.model.save_weights(filepath, overwrite=True)
+
+class tensorboardLogger(Callback):
+    def __init__(self, logdir = '/tmp/keras-rl-logs'):
+        
+        self.tf_session = K.get_session()
+        self.tf_summary_writer = tf.summary.FileWriter(logdir, self.tf_session.graph)
+        # Some algorithms compute multiple episodes at once since they are multi-threaded.
+        # We therefore use a dictionary that is indexed by the episode to separate episodes
+        # from each other.
+        self.episode_start = {}
+        self.observations = {}
+        self.rewards = {}
+        self.actions = {}
+        self.metrics = {}
+        self.step = 0
+        self.variables = None
+
+    def tf_log_scaler(self, tag, value, step):
+        summary = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
+        self.tf_summary_writer.add_summary(summary, step)
+
+    def on_train_begin(self, logs):
+        self.train_start = timeit.default_timer()
+        self.metrics_names = self.model.metrics_names
+        # print('Training for {} steps ...'.format(self.params['nb_steps']))
+        
+    def on_train_end(self, logs):
+        duration = timeit.default_timer() - self.train_start
+        # print('done, took {:.3f} seconds'.format(duration))
+
+    def on_episode_begin(self, episode, logs):
+        self.episode_start[episode] = timeit.default_timer()
+        self.observations[episode] = []
+        self.rewards[episode] = []
+        self.actions[episode] = []
+        self.metrics[episode] = []
+
+    def on_episode_end(self, episode, logs):
+        duration = timeit.default_timer() - self.episode_start[episode]
+        episode_steps = len(self.observations[episode])
+
+        # Format all metrics.
+        metrics = np.array(self.metrics[episode])
+        metrics_template = ''
+        metrics_variables = []
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error')
+            for idx, name in enumerate(self.metrics_names):
+                if idx > 0:
+                    metrics_template += ', '
+                try:
+                    value = np.nanmean(metrics[:, idx])
+                    metrics_template += '{}: {:f}'
+                except Warning:
+                    value = '--'
+                    metrics_template += '{}: {}'
+                metrics_variables += [name, value]          
+        metrics_text = metrics_template.format(*metrics_variables)
+
+        # nb_step_digits = str(int(np.ceil(np.log10(self.params['nb_steps']))) + 1)
+        # template = '{step: ' + nb_step_digits + 'd}/{nb_steps}: episode: {episode}, duration: {duration:.3f}s, episode steps: {episode_steps}, steps per second: {sps:.0f}, episode reward: {episode_reward:.3f}, mean reward: {reward_mean:.3f} [{reward_min:.3f}, {reward_max:.3f}], mean action: {action_mean:.3f} [{action_min:.3f}, {action_max:.3f}], mean observation: {obs_mean:.3f} [{obs_min:.3f}, {obs_max:.3f}], {metrics}'
+        self.variables = {
+            'step': self.step,
+            'nb_steps': self.params['nb_steps'],
+            'episode': episode + 1,
+            'duration': duration,
+            'episode_steps': episode_steps,
+            'sps': float(episode_steps) / duration,
+            'episode_reward': np.sum(self.rewards[episode]),
+            'reward_mean': np.mean(self.rewards[episode]),
+            'reward_min': np.min(self.rewards[episode]),
+            'reward_max': np.max(self.rewards[episode]),
+            'action_mean': np.mean(self.actions[episode]),
+            'action_min': np.min(self.actions[episode]),
+            'action_max': np.max(self.actions[episode]),
+            'obs_mean': np.mean(self.observations[episode]),
+            'obs_min': np.min(self.observations[episode]),
+            'obs_max': np.max(self.observations[episode]),
+            'metrics': metrics_text,
+        }
+        self.tf_log_scaler(tag='Average reward per episode' , value=self.variables['reward_mean'] ,step=episode)
+       
+        self.tf_log_scaler(tag='total reward per episode' , value=self.variables['episode_reward'] ,step=episode)
+        self.tf_log_scaler(tag='max reward per step' , value=self.variables['reward_max'] ,step=episode)
+       
+        # self.tf_log_scaler(tag='Average reward per step' , value=variables['reward_mean'] ,step=self.step)
+        # self.tf_log_scaler(tag='Average reward per step' , value=variables['reward_mean'] ,step=episode)
+        # print(template.format(**variables))
+
+        # Free up resources.
+        del self.episode_start[episode]
+        del self.observations[episode]
+        del self.rewards[episode]
+        del self.actions[episode]
+        del self.metrics[episode]
+
+    def on_step_end(self, step, logs):
+        episode = logs['episode']
+        self.observations[episode].append(logs['observation'])
+        self.rewards[episode].append(logs['reward'])
+        self.actions[episode].append(logs['action'])
+        self.metrics[episode].append(logs['metrics'])
+        
+        if self.variables is not None:
+                self.tf_log_scaler(tag='Average reward per step' , value=self.variables['reward_mean'] ,step=self.step)
+        
+        self.step += 1

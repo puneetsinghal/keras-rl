@@ -9,12 +9,17 @@ from rl.agents.dqn import DQNAgent
 from rl.policy import BoltzmannQPolicy
 from rl.memory import SequentialMemory
 
+from IPython import embed
 
-ENV_NAME = 'CartPole-v0'
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--mode', choices=['train', 'test'], default='train')
+parser.add_argument('--env-name', type=str, default='CartPole-v0')
+parser.add_argument('--weights', type=str, default=None)
+args = parser.parse_args()
 
 # Get the environment and extract the number of actions.
-env = gym.make(ENV_NAME)
+env = gym.make(args.env_name)
 np.random.seed(123)
 env.seed(123)
 nb_actions = env.action_space.n
@@ -40,13 +45,17 @@ dqn = DQNAgent(model=model, nb_actions=nb_actions, memory=memory, nb_steps_warmu
                target_model_update=1e-2, policy=policy)
 dqn.compile(Adam(lr=1e-3), metrics=['mae'])
 
-# Okay, now it's time to learn something! We visualize the training here for show, but this
-# slows down training quite a lot. You can always safely abort the training prematurely using
-# Ctrl + C.
-dqn.fit(env, nb_steps=50000, visualize=True, verbose=2)
+if args.mode == 'train':
+	# Okay, now it's time to learn something! We visualize the training here for show, but this
+	# slows down training quite a lot. You can always safely abort the training prematurely using
+	# Ctrl + C.
+	dqn.fit(env, nb_steps=50000, visualize=False, verbose=2)
 
-# After training is done, we save the final weights.
-dqn.save_weights('dqn_{}_weights.h5f'.format(ENV_NAME), overwrite=True)
+	# After training is done, we save the final weights.
+	dqn.save_weights('dqn_{}_weights.h5f'.format(args.env_name), overwrite=True)
+	dqn.test(env, nb_episodes=5, visualize=True)
 
-# Finally, evaluate our algorithm for 5 episodes.
-dqn.test(env, nb_episodes=5, visualize=True)
+elif args.mode == 'test':
+	# Finally, evaluate our algorithm for 5 episodes.
+	weights_filename = args.weights
+	dqn.load_weights(weights_filename)
